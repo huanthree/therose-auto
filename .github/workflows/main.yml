@@ -3,7 +3,11 @@ name: Auto Renew therose
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/55 * * * *"
+    - cron: '*/55 * * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   actions: write
@@ -15,29 +19,28 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: ⚙️ 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: 🛠️ 安装系统依赖和 Python 依赖
         run: |
           sudo apt-get update -q
           sudo apt-get install -y xvfb
           pip install seleniumbase requests
           seleniumbase install chromedriver
 
-      - name: Setup Proxy
-        continue-on-error: true
+      - name: 🌐 设置代理 (sing-box)
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh) || true
+          bash <(wget -qO- [https://main.ssss.nyc.mn/setup_proxy.sh](https://main.ssss.nyc.mn/setup_proxy.sh))
 
-      - name: Run Auto Script
+      - name: 🚀 运行续期与状态维护脚本
         env:
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}
@@ -49,19 +52,35 @@ jobs:
           TZ: Asia/Shanghai
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 therose.py
 
-      - name: Upload Screenshot
+      - name: 📤 上传运行截图 (用于排错)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: run-screenshots
-          path: "*.png"
+          path: ./*.png
+          retention-days: 3
           if-no-files-found: ignore
-```[cite: 2]
 
----
+      - name: 🧽 清理进程和临时文件
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f chromedriver || true
+          pkill -f chrome || true
+          pkill -f Xvfb || true
+          rm -f sing-box sing-box-config.json sing-box.log
 
-### 如何一秒确认 GitHub 给出的具体报错？
-如果复制保存该文件到 `.github/workflows/main.yml` 后，GitHub Actions 依然不显示[cite: 2]：
-1. 打开你的 GitHub 仓库，点击顶部的 **Actions** 标签页。
-2. 查看左侧侧边栏或页面中间，如果语法有误，GitHub 会用红色文字明确提示：`There is an error in the workflow file...`。
-3. 如果依然没有任何显示，请核对你当前提交的分支是否为 **Default Branch（主分支）**。
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 5 ]; then
+              echo "🗑️ 删除较旧的运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
