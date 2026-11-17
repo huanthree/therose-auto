@@ -5,16 +5,15 @@ import os, re, sys, time, requests
 from seleniumbase import SB
 
 # 环境变量
-EMAIL = os.environ.get("EMAIL") or ""            # 邮箱   
-PASSWORD = os.environ.get("PASSWORD") or ""      # 密码
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""  # tg通知 bot token
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""      # tg通知 chat_id id
+EMAIL = (os.environ.get("EMAIL") or "").strip()            # 去除可能误带的首尾空白
+PASSWORD = (os.environ.get("PASSWORD") or "").strip()
+TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
+TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 
 # 目标服务器面板地址
 SERVER_URL = os.environ.get("SERVER_URL") or "https://panel.therose.cloud/server/1ce3ddfb"
 BASE_URL = "https://client.therose.cloud/login"
 
-# logo 图片路径 (做兜底使用)
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
 # --- 代理配置 ---
@@ -22,12 +21,10 @@ IS_PROXY = os.environ.get('IS_PROXY', 'false').lower() == 'true'
 PROXY_SERVER = os.environ.get('PROXY_SERVER') or "socks5://127.0.0.1:1080"
 REQUESTS_PROXIES = {"http": PROXY_SERVER, "https": PROXY_SERVER} if IS_PROXY else None
 
-# 检查必要变量
 if not EMAIL or not PASSWORD:
     print("❌ 请设置环境变量 EMAIL 和 PASSWORD")
     sys.exit(1)
 
-# 获取当前出口IP
 def get_current_ip(proxy_server=None):
     proxies = {"http": proxy_server, "https": proxy_server} if (proxy_server and IS_PROXY) else None
     try:
@@ -39,7 +36,6 @@ def get_current_ip(proxy_server=None):
         print(f"❌ 获取出口IP失败: {e}")
         return "获取失败"
 
-# 点击续期按钮
 def click_extend_button(sb):
     selectors = [
         'span:contains("Extend")',
@@ -64,7 +60,6 @@ def click_extend_button(sb):
         not_time = "was not found" in err or "NoSuchElement" in err
         return False, {"error": err, "not_time": not_time}
 
-# 检查续期是否成功
 def check_renewal_success(sb):
     success_selectors = [
         '.alert-success',
@@ -98,13 +93,10 @@ def check_renewal_success(sb):
     
     return False, "未检测到续期成功提示"
 
-# 发送tg通知 (增加 image_path 参数)
 def send_tg(token, chat_id, message, image_path=None):
     if not token or not chat_id:
         return
     message = f"【TheRose Cloud】\n{message}"
-
-    # 优先使用传入的实时截图，如果没有则使用本地的 LOGO_PATH
     target_image = image_path if (image_path and os.path.exists(image_path)) else (LOGO_PATH if os.path.exists(LOGO_PATH) else None)
 
     if target_image:
@@ -136,58 +128,90 @@ def send_tg(token, chat_id, message, image_path=None):
     except Exception as e:
         print(f"❌ Telegram 发送异常: {e}")
 
-# 登录流程
+# 等待 Turnstile Token 产生
+def wait_for_turnstile_token(sb, max_wait=20):
+    print("⏳ 等待 Turnstile 验证生成 Token...")
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        try:
+            # 检查是否有非空的 cf-turnstile-response 值
+            token = sb.execute_script("""
+                const el = document.querySelector('[name="cf-turnstile-response"]');
+                return el ? el.value : "";
+            """)
+            if token and len(token.strip()) > 10:
+                print(f"✅ 检测到 Turnstile Token 已生成 (长度: {len(token)})")
+                return True
+        except Exception:
+            pass
+        sb.sleep(1)
+    print("⚠️ 达到最大等待时间，Turnstile Token 仍未检测到，尝试强行提交")
+    return False
+
+# 登录流程强化版
 def login(sb, email, password):
     print("🌐 打开登录页面...")
     sb.open(BASE_URL)
     sb.wait_for_ready_state_complete()
-    sb.sleep(1)
-    print("📧 填写邮箱...")
-    sb.type('#login_form_email', email, timeout=10)
-    print("🔑 填写密码...")
-    sb.type('#login_form_password', password, timeout=10)
-    time.sleep(1) 
-    print("🛡 处理 Turnstile...")
-    try:
-        sb.uc_gui_click_captcha()
-        print("✅ Turnstile 验证已处理")
-    except Exception as e:
-        print(f"⚠️ uc_gui_click_captcha 执行异常: {e}")
-        
-    print("⏳ 等待验证 token 生效...")
     sb.sleep(2)
+
+    print("📧 填写邮箱...")
+    sb.wait_for_element_visible('#login_form_email', timeout=15)
+    sb.clear('#login_form_email')
+    sb.type('#login_form_email', email)
+
+    print("🔑 填写密码...")
+    sb.wait_for_element_visible('#login_form_password', timeout=15)
+    sb.clear('#login_form_password')
+    sb.type('#login_form_password', password)
+    time.sleep(1)
+
+    print("🛡 处理 Turnstile 验证码...")
+    try:
+        # 先尝试点击 Turnstile 复选框
+        sb.uc_gui_click_captcha()
+    except Exception as e:
+        print(f"⚠️ uc_gui_click_captcha 调用提示: {e}")
+
+    # 动态等待 Token 生成，最多等 20 秒
+    wait_for_turnstile_token(sb, max_wait=20)
+    sb.sleep(1)
 
     for attempt in range(3):
         print(f"🔑 点击登录按钮...(第 {attempt + 1} 次)")
         try:
-            sb.uc_click('button:contains("Sign in")')
+            # 兼容多种 Sign in 选择器
+            if sb.is_element_visible('button:contains("Sign in")'):
+                sb.uc_click('button:contains("Sign in")')
+            else:
+                sb.uc_click('button[type="submit"]')
         except Exception as e:
             print(f"⚠️ 点击异常: {e}")
 
-        for _ in range(5):
+        # 检查是否跳转或出现错误
+        for _ in range(6):
             current_url = sb.get_current_url()
-            if "panel" in current_url:
-                print("✅ 登录成功，已跳转到 Dashboard")
+            if "panel" in current_url or "/dashboard" in current_url:
+                print(f"✅ 登录成功，当前 URL: {current_url}")
                 return True, current_url
-            time.sleep(1)
-
-        try:
-            err_selectors = ['.alert-danger', 'div[role="alert"].alert-danger', '.text-danger']
+            
+            # 检测是否提示凭据错误
+            err_selectors = ['.alert-danger', 'div[role="alert"]', '.text-danger']
             for sel in err_selectors:
                 if sb.is_element_visible(sel):
-                    err_text = sb.get_text(sel)
-                    print(f"❌ 登录出现错误提示: {err_text}")
-                    sb.save_screenshot("login_failed.png")
-                    return False, sb.get_current_url()
-        except Exception:
-            pass
-        print("⚠️ 未跳转，可能是点击未生效或 token 还未就绪，准备重试...")
+                    err_text = sb.get_text(sel).strip()
+                    if err_text:
+                        print(f"❌ 登录出现明确错误提示: {err_text}")
+                        sb.save_screenshot("login_failed.png")
+                        return False, sb.get_current_url()
+            time.sleep(1)
 
-    print(f"❌ 登录失败，当前 URL: {sb.get_current_url()}")
+        print("⚠️ 未完成跳转，准备重试...")
+
+    print(f"❌ 登录超时或失败，当前 URL: {sb.get_current_url()}")
     sb.save_screenshot("login_failed.png")
     return False, sb.get_current_url()
 
-# 执行启动或重启服务器操作
 def start_or_reboot_server(sb, url):
     print(f"🔄 准备进入服务器面板进行启动/重启: {url}")
     try:
@@ -195,7 +219,6 @@ def start_or_reboot_server(sb, url):
         sb.wait_for_ready_state_complete()
         time.sleep(5)
         
-        # 1. 处理控制面板需要独立登录的情况
         if sb.is_element_visible('input[type="password"]'):
             print("🔒 检测到控制面板需要独立登录，正在尝试自动输入账号密码...")
             try:
@@ -220,7 +243,6 @@ def start_or_reboot_server(sb, url):
             except Exception as e:
                 print(f"⚠️ 自动登录控制面板发生错误: {e}")
         
-        # 2. 检查是否被重定向到主页，如果是则强制返回详情页
         current_url = sb.get_current_url()
         if "/server/" not in current_url:
             print("🔀 检测到停留在主列表页，正在强制进入目标服务器控制台...")
@@ -228,7 +250,6 @@ def start_or_reboot_server(sb, url):
             sb.wait_for_ready_state_complete()
             time.sleep(6)
 
-        # 3. 寻找并点击“启动”或“重启”按钮
         btn_clicked = False
         action_name = ""
         
@@ -241,7 +262,7 @@ def start_or_reboot_server(sb, url):
         for sel in start_selectors:
             try:
                 if sb.is_element_visible(sel) and sb.is_element_enabled(sel):
-                    print(f"✅ 服务器似乎处于离线状态，找到可用【启动】按钮: {sel}")
+                    print(f"✅ 找到可用【启动】按钮: {sel}")
                     sb.uc_click(sel)
                     btn_clicked = True
                     action_name = "启动"
@@ -260,7 +281,7 @@ def start_or_reboot_server(sb, url):
             for sel in reboot_selectors:
                 try:
                     if sb.is_element_visible(sel) and sb.is_element_enabled(sel):
-                        print(f"✅ 服务器处于运行状态，找到可用【重启】按钮: {sel}")
+                        print(f"✅ 找到可用【重启】按钮: {sel}")
                         sb.uc_click(sel)
                         btn_clicked = True
                         action_name = "重启"
@@ -269,11 +290,10 @@ def start_or_reboot_server(sb, url):
                     continue
                 
         if not btn_clicked:
-            print("⚠️ 未能通过常规选择器找到可用按钮，正在使用 JavaScript 智能定位...")
+            print("⚠️ 未能通过常规选择器找到可用按钮，正在使用 JavaScript 定位...")
             try:
                 js_result = sb.driver.execute_script("""
                     const buttons = document.querySelectorAll('button');
-                    
                     for (let btn of buttons) {
                         let text = btn.innerText || "";
                         let html = btn.innerHTML || "";
@@ -282,7 +302,6 @@ def start_or_reboot_server(sb, url):
                             btn.click(); return '启动';
                         }
                     }
-                    
                     for (let btn of buttons) {
                         let text = btn.innerText || "";
                         let html = btn.innerHTML || "";
@@ -291,16 +310,6 @@ def start_or_reboot_server(sb, url):
                             btn.click(); return '重启';
                         }
                     }
-                    
-                    const allBtnGroups = document.querySelectorAll('div.flex.items-center, div.gap-2');
-                    for (let group of allBtnGroups) {
-                        const groupBtns = group.querySelectorAll('button');
-                        if (groupBtns.length >= 3) {
-                            if (!groupBtns[0].disabled) { groupBtns[0].click(); return '启动(盲猜)'; }
-                            if (!groupBtns[1].disabled) { groupBtns[1].click(); return '重启(盲猜)'; }
-                        }
-                    }
-                    
                     return null;
                 """)
                 if js_result:
@@ -320,7 +329,6 @@ def start_or_reboot_server(sb, url):
     except Exception as e:
         return False, f"维护操作发生异常: {e}"
 
-# 主流程
 def main():
     print("🚀 启动浏览器")
 
@@ -340,9 +348,8 @@ def main():
         success, url = login(sb, EMAIL, PASSWORD)
         
         if not success:
-            msg = f"❌ 登录失败，请检查账号密码或验证码拦截情况。"
+            msg = "❌ 登录失败，请检查账号密码或验证码拦截情况。"
             print(msg)
-            # 发送失败并附带截图
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="login_failed.png")
             return
 
@@ -388,10 +395,8 @@ def main():
             msg_reboot = f"⚠️ 状态维护失败: {reboot_msg}"
         print(msg_reboot)
         
-        # 截图保存最终状态，并推送到 Telegram
         final_image = "final_result.png"
         sb.save_screenshot(final_image)
-        
         final_msg = f"IP: {current_ip}\n\n{msg_renewal}\n---\n{msg_reboot}"
         send_tg(TG_BOT_TOKEN, TG_CHAT_ID, final_msg, image_path=final_image)
 
