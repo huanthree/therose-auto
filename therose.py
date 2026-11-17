@@ -15,8 +15,9 @@ TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 
 # 目标服务器面板地址
-SERVER_URL = os.environ.get("SERVER_URL") or "https://panel.therose.cloud/server/1ce3ddfb"
+SERVER_URL = (os.environ.get("SERVER_URL") or "https://therose.cloud/dashboard").strip()
 BASE_URL = "https://therose.cloud/login"
+DASHBOARD_URL = "https://therose.cloud/dashboard"
 
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -93,7 +94,7 @@ def wait_for_turnstile_token(sb, max_wait=20):
         except Exception:
             pass
         time.sleep(1)
-    print("⚠️ 达到最大等待时间，Turnstile Token 仍未检测到，尝试强行提交")
+    print("⚠️ 达到最大等待时间，Turnstile Token 仍未检测到，尝试继续提交")
     return False
 
 
@@ -165,8 +166,6 @@ def login(sb, email, password):
         print(f"❌ 页面打开失败: {e}")
         sb.save_screenshot("login_failed.png")
         return False, sb.get_current_url()
-
-    sb.save_screenshot("page_opened.png")
 
     print("📧 填写邮箱...")
     if not fill_input_safely(sb, "email", email):
@@ -245,77 +244,153 @@ def login(sb, email, password):
     return False, sb.get_current_url()
 
 
-def click_extend_button(sb):
+def click_renew_or_restore(sb):
+    print("🔍 正在 Dashboard 页面寻找【Renew / Restore】按钮...")
+    if "/dashboard" not in sb.get_current_url():
+        sb.open(DASHBOARD_URL)
+        sb.wait_for_ready_state_complete()
+        time.sleep(3)
+
+    # 1. 常规 SeleniumBase 选择器匹配新版按钮
     selectors = [
-        'span:contains("Extend")',
-        'button:contains(title="Extend")',
+        'button:contains("Renew and restore")',
+        'a:contains("Renew and restore")',
+        'button:contains("Renew for another")',
+        'a:contains("Renew for another")',
+        'button:contains("Renew")',
+        'a:contains("Renew")',
+        'span:contains("Renew")',
         'button:contains("Extend")',
-        'a:contains("Extend")'
+        'span:contains("Extend")'
     ]
+
     for sel in selectors:
         try:
-            if sb.find_element(sel, timeout=2):
-                print(f"✅ 找到按钮，选择器: {sel}")
+            if sb.is_element_visible(sel):
+                btn_text = sb.get_text(sel).strip()
+                print(f"✅ 找到续期/恢复按钮: [{btn_text}] (选择器: {sel})")
                 sb.uc_click(sel, timeout=5)
-                print("✅ 点击成功")
-                return True, {}
+                return True, btn_text
         except Exception:
             continue
+
+    # 2. JavaScript 深度遍历匹配（应对特殊自定义标签或嵌套结构）
     try:
-        btn = sb.find_element('button:contains("Extend")', timeout=2)
-        sb.driver.execute_script("arguments[0].click();", btn)
-        print("✅ 通过 JavaScript 点击成功")
-        return True, {}
+        clicked_text = sb.driver.execute_script("""
+            const elements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+            for (let el of elements) {
+                let text = (el.innerText || el.textContent || "").trim();
+                if ((text.includes('Renew and restore') || text.includes('Renew for another') || text.startsWith('↻ Renew') || text === 'Renew' || text.includes('Extend')) && el.offsetParent !== null) {
+                    if (!el.disabled) {
+                        el.click();
+                        return text;
+                    }
+                }
+            }
+            return null;
+        """)
+        if clicked_text:
+            print(f"✅ 通过 JavaScript 成功点击按钮: [{clicked_text}]")
+            return True, clicked_text
     except Exception as e:
-        err = str(e)
-        not_time = "was not found" in err or "NoSuchElement" in err
-        return False, {"error": err, "not_time": not_time}
+        print(f"⚠️ JS 搜索 Renew 按钮异常: {e}")
+
+    return False, "未找到可用的 Renew / Restore 按钮（可能尚未到续期开放时间）"
 
 
-def check_renewal_success(sb):
-    success_selectors = [
-        '.alert-success',
-        '.alert.alert-success',
-        'div[role="alert"].alert-success',
-        'div.alert-success',
-        'span:contains("successfully purchased")',
-        'div:contains("successfully purchased")'
+def try_click_start_on_current_page(sb):
+    print("🔍 正在当前页面寻找并点击【Start / 启动】按钮...")
+    start_selectors = [
+        'button:contains("Start")',
+        'a:contains("Start")',
+        'button:contains("启动")',
+        'button[data-action="start"]',
+        'button[title*="Start" i]',
+        'button i.fa-play',
+        'button svg.fa-play'
     ]
 
-    print("⏳ 等待5秒检查续期结果...")
-    time.sleep(5)
-
-    for selector in success_selectors:
+    for sel in start_selectors:
         try:
-            element = sb.find_element(selector, timeout=2)
-            if element:
-                text = element.text
-                print(f"✅ 发现成功提示！选择器: {selector}")
-                return True, text
+            if sb.is_element_visible(sel) and sb.is_element_enabled(sel):
+                btn_text = sb.get_text(sel).strip() or "Start"
+                print(f"✅ 找到可用【Start】按钮: [{btn_text}] (选择器: {sel})")
+                sb.uc_click(sel)
+                time.sleep(3)
+                return True, f"已点击 [{btn_text}] 按钮"
         except Exception:
             continue
 
+    # JS 深度查找 Start 按钮（包括带播放图标的按钮或包含 Start 文本的按钮）
     try:
-        page_source = sb.get_page_source()
-        if "successfully purchased" in page_source.lower():
-            print("✅ 页面源码中发现 'successfully purchased' 关键词")
-            return True, "服务器已成功续期"
-    except Exception:
-        pass
+        js_clicked = sb.driver.execute_script("""
+            const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+            for (let btn of candidates) {
+                if (btn.offsetParent === null || btn.disabled) continue;
+                let text = (btn.innerText || btn.textContent || "").trim();
+                let title = (btn.getAttribute('title') || btn.getAttribute('aria-label') || "").trim();
+                let html = btn.innerHTML || "";
+                if (
+                    text === 'Start' ||
+                    text.includes('Start server') ||
+                    text.includes('启动') ||
+                    title.toLowerCase().includes('start') ||
+                    btn.getAttribute('data-action') === 'start' ||
+                    html.includes('fa-play')
+                ) {
+                    btn.click();
+                    return text || title || 'Start(图标按钮)';
+                }
+            }
+            return null;
+        """)
+        if js_clicked:
+            print(f"✅ 通过 JavaScript 成功点击了【{js_clicked}】按钮")
+            time.sleep(3)
+            return True, f"已通过 JS 点击 [{js_clicked}]"
+    except Exception as e:
+        print(f"⚠️ JS 查找 Start 按钮异常: {e}")
 
-    return False, "未检测到续期成功提示"
+    return False, "当前页面未检测到可用的 Start 按钮"
 
 
 def start_or_reboot_server(sb, url):
-    print(f"🔄 准备进入服务器面板进行启动/重启: {url}")
-    try:
-        sb.open(url)
-        sb.wait_for_ready_state_complete()
-        time.sleep(5)
+    print("🔄 步骤 1: 先在当前 Dashboard 页面检查并尝试点击 Start 按钮...")
+    ok_dash, msg_dash = try_click_start_on_current_page(sb)
+    if ok_dash:
+        return True, f"在 Dashboard 页面直接启动成功 ({msg_dash})"
 
-        if sb.is_element_visible('input[type="password"]'):
-            print("🔒 检测到控制面板需要独立登录，正在尝试自动输入账号密码...")
-            try:
+    # 如果 Dashboard 上点击了服务器卡片能进入详情页，或者用户配置了独立的 SERVER_URL
+    print("🔄 步骤 2: 尝试进入服务器详情页/控制面板启动服务器...")
+    try:
+        # 尝试在 Dashboard 点击服务器卡片标题（如 linglong 或 #96ac0384）进入内页
+        entered_detail = sb.driver.execute_script("""
+            const links = Array.from(document.querySelectorAll('a'));
+            for (let a of links) {
+                let href = a.getAttribute('href') || "";
+                if (href.includes('/server') || href.includes('/panel')) {
+                    a.click();
+                    return href;
+                }
+            }
+            return null;
+        """)
+        if entered_detail:
+            print(f"🔀 已通过卡片链接进入详情页: {entered_detail}")
+            time.sleep(5)
+            ok_detail, msg_detail = try_click_start_on_current_page(sb)
+            if ok_detail:
+                return True, f"在服务器详情页启动成功 ({msg_detail})"
+
+        # 如果配置了非 dashboard 的独立 SERVER_URL，则打开该地址尝试启动
+        if url and "therose.cloud/dashboard" not in url:
+            print(f"🌐 打开独立面板地址: {url}")
+            sb.open(url)
+            sb.wait_for_ready_state_complete()
+            time.sleep(5)
+
+            if sb.is_element_visible('input[type="password"]'):
+                print("🔒 检测到控制面板需要独立登录，正在自动输入账号密码...")
                 fill_input_safely(sb, "email", EMAIL)
                 fill_input_safely(sb, "password", PASSWORD)
                 time.sleep(1)
@@ -328,95 +403,16 @@ def start_or_reboot_server(sb, url):
                     sb.click('button:contains("Login")')
                 except Exception:
                     sb.click('button[type="submit"]')
-                time.sleep(8)
-            except Exception as e:
-                print(f"⚠️ 自动登录控制面板发生错误: {e}")
+                time.sleep(6)
 
-        current_url = sb.get_current_url()
-        if "/server/" not in current_url:
-            print("🔀 检测到停留在主列表页，正在强制进入目标服务器控制台...")
-            sb.open(url)
-            sb.wait_for_ready_state_complete()
-            time.sleep(6)
+            ok_panel, msg_panel = try_click_start_on_current_page(sb)
+            if ok_panel:
+                return True, f"在独立控制面板启动成功 ({msg_panel})"
 
-        btn_clicked = False
-        action_name = ""
-
-        start_selectors = [
-            'button:contains("启动")',
-            'button:contains("Start")',
-            'button[data-action="start"]',
-            'button i.fa-play'
-        ]
-        for sel in start_selectors:
-            try:
-                if sb.is_element_visible(sel) and sb.is_element_enabled(sel):
-                    print(f"✅ 找到可用【启动】按钮: {sel}")
-                    sb.uc_click(sel)
-                    btn_clicked = True
-                    action_name = "启动"
-                    break
-            except Exception:
-                continue
-
-        if not btn_clicked:
-            reboot_selectors = [
-                'button:contains("重启")',
-                'button:contains("Restart")',
-                'button[data-action="restart"]',
-                'button i.fa-redo',
-                'button i.fa-sync'
-            ]
-            for sel in reboot_selectors:
-                try:
-                    if sb.is_element_visible(sel) and sb.is_element_enabled(sel):
-                        print(f"✅ 找到可用【重启】按钮: {sel}")
-                        sb.uc_click(sel)
-                        btn_clicked = True
-                        action_name = "重启"
-                        break
-                except Exception:
-                    continue
-
-        if not btn_clicked:
-            print("⚠️ 未能通过常规选择器找到可用按钮，正在使用 JavaScript 定位...")
-            try:
-                js_result = sb.driver.execute_script("""
-                    const buttons = document.querySelectorAll('button');
-                    for (let btn of buttons) {
-                        let text = btn.innerText || "";
-                        let html = btn.innerHTML || "";
-                        let action = btn.getAttribute('data-action') || "";
-                        if ((action === 'start' || html.includes('fa-play') || text.includes('Start') || text.includes('启动')) && !btn.disabled) {
-                            btn.click(); return '启动';
-                        }
-                    }
-                    for (let btn of buttons) {
-                        let text = btn.innerText || "";
-                        let html = btn.innerHTML || "";
-                        let action = btn.getAttribute('data-action') || "";
-                        if ((action === 'restart' || html.includes('fa-redo') || html.includes('fa-sync') || text.includes('Restart') || text.includes('重启')) && !btn.disabled) {
-                            btn.click(); return '重启';
-                        }
-                    }
-                    return null;
-                """)
-                if js_result:
-                    btn_clicked = True
-                    action_name = js_result
-                    print(f"✅ 通过 JavaScript 成功点击了【{action_name}】按钮")
-            except Exception as ex:
-                print(f"⚠️ JS 降级点击失败: {ex}")
-
-        if btn_clicked:
-            print(f"⏳ 等待 {action_name} 命令发送...")
-            time.sleep(3)
-            return True, f"已成功发送 [{action_name}] 指令"
-        else:
-            return False, "页面上未检测到可用的启动或重启按钮"
+        return False, "Dashboard 与面板内均未检测到可用的 Start 按钮（服务器可能已在运行中）"
 
     except Exception as e:
-        return False, f"维护操作发生异常: {e}"
+        return False, f"启动维护操作发生异常: {e}"
 
 
 def main():
@@ -444,46 +440,37 @@ def main():
                 send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="login_failed.png")
                 return
 
-            print("📄 开始续期流程...")
-            ok, info = click_extend_button(sb)
+            print("📄 开始续期 / 恢复挂起流程...")
+            ok_renew, renew_info = click_renew_or_restore(sb)
 
-            if not ok:
-                if info.get("not_time"):
-                    msg_renewal = "⏳ 未到续期时间，Extend 按钮尚未出现（一般到期前半小时开放），本次跳过。"
-                else:
-                    msg_renewal = f"❌ 续期失败，未找到 Extend 按钮 ({info.get('error')})。"
-                print(msg_renewal)
-            else:
-                time.sleep(1)
+            if ok_renew:
+                print(f"⏳ 已点击 [{renew_info}]，等待 6 秒让状态刷新...")
+                time.sleep(6)
+
+                # 检查点击 Renew 后是否弹出了需要二次确认的弹窗或验证码
                 try:
-                    button = sb.find_element('button:contains("Order now")', timeout=5)
-                    if button:
-                        print("🛒 点击 Order now 按钮...")
+                    if sb.is_element_visible('button:contains("Confirm")'):
+                        sb.uc_click('button:contains("Confirm")')
+                        time.sleep(4)
+                    elif sb.is_element_visible('button:contains("Order now")'):
                         sb.uc_click('button:contains("Order now")')
-                    else:
-                        msg_renewal = "❌ 续期异常，未找到 Order now 按钮。"
-                        print(msg_renewal)
-                except Exception as e:
-                    msg_renewal = f"❌ 点击 Order now 发生错误: {e}。"
-                    print(msg_renewal)
+                        time.sleep(4)
+                except Exception:
+                    pass
 
-                print("🔍 检查续期结果...")
-                renewal_success, renewal_msg = check_renewal_success(sb)
-                if renewal_success:
-                    msg_renewal = f"✅ 续期成功！{renewal_msg}"
-                    sb.save_screenshot("renewal_success.png")
-                else:
-                    msg_renewal = f"❌ 续期可能失败: {renewal_msg}"
-                    sb.save_screenshot("renewal_failed.png")
-                print(msg_renewal)
+                sb.save_screenshot("renewal_success.png")
+                msg_renewal = f"✅ 成功触发续期/恢复按钮: [{renew_info}]"
+            else:
+                msg_renewal = f"⏳ 本次未触发续期: {renew_info}"
+            print(msg_renewal)
 
-            print("🔄 开始检查并执行服务器启动/重启维护...")
+            print("🔄 开始检查并执行服务器 Start 启动维护...")
             reboot_ok, reboot_msg = start_or_reboot_server(sb, SERVER_URL)
 
             if reboot_ok:
-                msg_reboot = f"✅ 自动状态维护成功: {reboot_msg}"
+                msg_reboot = f"✅ 自动启动成功: {reboot_msg}"
             else:
-                msg_reboot = f"⚠️ 状态维护失败: {reboot_msg}"
+                msg_reboot = f"ℹ️ 启动状态说明: {reboot_msg}"
             print(msg_reboot)
 
             final_image = "final_result.png"
