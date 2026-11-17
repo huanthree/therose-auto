@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, requests
+import os, re, sys, time, requests, traceback
 from seleniumbase import SB
 
 # 环境变量
-EMAIL = (os.environ.get("EMAIL") or "").strip()            # 邮箱，自动去除前后空白
-PASSWORD = (os.environ.get("PASSWORD") or "").strip()      # 密码，自动去除前后空白
+EMAIL = (os.environ.get("EMAIL") or "").strip()
+PASSWORD = (os.environ.get("PASSWORD") or "").strip()
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 
 # 目标服务器面板地址
 SERVER_URL = os.environ.get("SERVER_URL") or "https://panel.therose.cloud/server/1ce3ddfb"
-# 修正后的主站登录入口
 BASE_URL = "https://therose.cloud/login"
 
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
@@ -36,63 +35,6 @@ def get_current_ip(proxy_server=None):
     except Exception as e:
         print(f"❌ 获取出口IP失败: {e}")
         return "获取失败"
-
-def click_extend_button(sb):
-    selectors = [
-        'span:contains("Extend")',
-        'button:contains(title="Extend")',
-    ]
-    for sel in selectors:
-        try:
-            if sb.find_element(sel, timeout=2):
-                print(f"✅ 找到按钮，选择器: {sel}")
-                sb.uc_click(sel, timeout=5)
-                print("✅ 点击成功")
-                return True, {}
-        except:
-            continue
-    try:
-        btn = sb.find_element('button:contains("Extend")', timeout=2)
-        sb.driver.execute_script("arguments[0].click();", btn)
-        print("✅ 通过 JavaScript 点击成功")
-        return True, {}
-    except Exception as e:
-        err = str(e)
-        not_time = "was not found" in err or "NoSuchElement" in err
-        return False, {"error": err, "not_time": not_time}
-
-def check_renewal_success(sb):
-    success_selectors = [
-        '.alert-success',
-        '.alert.alert-success',
-        'div[role="alert"].alert-success',
-        'div.alert-success',
-        'span:contains("successfully purchased")',
-        'div:contains("successfully purchased")'
-    ]
-    
-    print("⏳ 等待5秒检查续期结果...")
-    time.sleep(5)
-    
-    for selector in success_selectors:
-        try:
-            element = sb.find_element(selector, timeout=2)
-            if element:
-                text = element.text
-                print(f"✅ 发现成功提示！选择器: {selector}")
-                return True, text
-        except:
-            continue
-    
-    try:
-        page_source = sb.get_page_source()
-        if "successfully purchased" in page_source.lower():
-            print("✅ 页面源码中发现 'successfully purchased' 关键词")
-            return True, "服务器已成功续期"
-    except:
-        pass
-    
-    return False, "未检测到续期成功提示"
 
 def send_tg(token, chat_id, message, image_path=None):
     if not token or not chat_id:
@@ -148,52 +90,137 @@ def wait_for_turnstile_token(sb, max_wait=20):
     print("⚠️ 达到最大等待时间，Turnstile Token 仍未检测到，尝试强行提交")
     return False
 
-# 登录流程强化版
+# 智能查找并填入表单字段
+def fill_input_safely(sb, field_type, value):
+    if field_type == "email":
+        selectors = [
+            'input[type="email"]',
+            'input[name="email"]',
+            '#email',
+            '#login_form_email',
+            'input[autocomplete="email"]',
+            'input[placeholder*="email" i]',
+            'input[placeholder*="邮箱" i]'
+        ]
+    else:
+        selectors = [
+            'input[type="password"]',
+            'input[name="password"]',
+            '#password',
+            '#login_form_password',
+            'input[autocomplete="current-password"]',
+            'input[placeholder*="password" i]',
+            'input[placeholder*="密码" i]'
+        ]
+
+    for sel in selectors:
+        try:
+            if sb.is_element_visible(sel):
+                sb.clear(sel)
+                sb.type(sel, value)
+                print(f"✅ 成功填入 {field_type} (使用选择器: {sel})")
+                return True
+        except Exception:
+            continue
+
+    # 兜底：通过 JS 填入
+    try:
+        script = f"""
+            const inputs = Array.from(document.querySelectorAll('input'));
+            let target = null;
+            if ('{field_type}' === 'email') {{
+                target = inputs.find(i => i.type === 'email' || i.name.includes('email') || i.id.includes('email'));
+            }} else {{
+                target = inputs.find(i => i.type === 'password' || i.name.includes('password') || i.id.includes('password'));
+            }}
+            if (target) {{
+                target.value = '{value}';
+                target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return true;
+            }}
+            return false;
+        """
+        if sb.execute_script(script):
+            print(f"✅ 通过 JS 脚本成功填入 {field_type}")
+            return True
+    except Exception as e:
+        print(f"⚠️ JS 填入 {field_type} 异常: {e}")
+
+    return False
+
 def login(sb, email, password):
     print("🌐 打开登录页面...")
-    sb.open(BASE_URL)
-    sb.wait_for_ready_state_complete()
-    sb.sleep(2)
+    try:
+        sb.open(BASE_URL)
+        sb.wait_for_ready_state_complete()
+        sb.sleep(3)
+    except Exception as e:
+        print(f"❌ 页面打开失败: {e}")
+        sb.save_screenshot("login_failed.png")
+        return False, sb.get_current_url()
+
+    # 截图当前打开的初始页面，便于核对实际展示内容
+    sb.save_screenshot("page_opened.png")
 
     print("📧 填写邮箱...")
-    sb.wait_for_element_visible('#login_form_email', timeout=15)
-    sb.clear('#login_form_email')
-    sb.type('#login_form_email', email)
+    if not fill_input_safely(sb, "email", email):
+        print("❌ 未能找到邮箱输入框，立即保存当前页面截图")
+        sb.save_screenshot("login_failed.png")
+        return False, sb.get_current_url()
 
     print("🔑 填写密码...")
-    sb.wait_for_element_visible('#login_form_password', timeout=15)
-    sb.clear('#login_form_password')
-    sb.type('#login_form_password', password)
+    if not fill_input_safely(sb, "password", password):
+        print("❌ 未能找到密码输入框，立即保存当前页面截图")
+        sb.save_screenshot("login_failed.png")
+        return False, sb.get_current_url()
+
     time.sleep(1)
 
     print("🛡 处理 Turnstile 验证码...")
     try:
         sb.uc_gui_click_captcha()
     except Exception as e:
-        print(f"⚠️ uc_gui_click_captcha 调用提示: {e}")
+        print(f"⚠️ uc_gui_click_captcha 执行提示: {e}")
 
-    # 动态等待 Token 产生
     wait_for_turnstile_token(sb, max_wait=20)
     sb.sleep(1)
 
     for attempt in range(3):
         print(f"🔑 点击登录按钮...(第 {attempt + 1} 次)")
-        try:
-            if sb.is_element_visible('button:contains("Sign in")'):
-                sb.uc_click('button:contains("Sign in")')
-            else:
-                sb.uc_click('button[type="submit"]')
-        except Exception as e:
-            print(f"⚠️ 点击异常: {e}")
+        clicked = False
+        btn_selectors = [
+            'button[type="submit"]',
+            'button:contains("Sign in")',
+            'button:contains("Log in")',
+            'button:contains("登录")',
+            'input[type="submit"]'
+        ]
+        for btn_sel in btn_selectors:
+            try:
+                if sb.is_element_visible(btn_sel):
+                    sb.uc_click(btn_sel)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            try:
+                sb.execute_script("""
+                    const btn = document.querySelector('button[type="submit"]') || Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Sign') || b.innerText.includes('Log'));
+                    if (btn) btn.click();
+                """)
+            except Exception:
+                pass
 
         for _ in range(6):
             current_url = sb.get_current_url()
-            # 适配跳转到主控制台 /dashboard 或独立面板 /panel 的情况
-            if "dashboard" in current_url or "panel" in current_url:
+            if "/dashboard" in current_url or "/panel" in current_url or "/server" in current_url:
                 print(f"✅ 登录成功，当前 URL: {current_url}")
                 return True, current_url
             
-            err_selectors = ['.alert-danger', 'div[role="alert"]', '.text-danger']
+            err_selectors = ['.alert-danger', 'div[role="alert"]', '.text-danger', 'span.text-red-500']
             for sel in err_selectors:
                 if sb.is_element_visible(sel):
                     err_text = sb.get_text(sel).strip()
@@ -209,6 +236,65 @@ def login(sb, email, password):
     sb.save_screenshot("login_failed.png")
     return False, sb.get_current_url()
 
+def click_extend_button(sb):
+    selectors = [
+        'span:contains("Extend")',
+        'button:contains(title="Extend")',
+        'button:contains("Extend")',
+        'a:contains("Extend")'
+    ]
+    for sel in selectors:
+        try:
+            if sb.find_element(sel, timeout=2):
+                print(f"✅ 找到按钮，选择器: {sel}")
+                sb.uc_click(sel, timeout=5)
+                print("✅ 点击成功")
+                return True, {}
+        except Exception:
+            continue
+    try:
+        btn = sb.find_element('button:contains("Extend")', timeout=2)
+        sb.driver.execute_script("arguments[0].click();", btn)
+        print("✅ 通过 JavaScript 点击成功")
+        return True, {}
+    except Exception as e:
+        err = str(e)
+        not_time = "was not found" in err or "NoSuchElement" in err
+        return False, {"error": err, "not_time": not_time}
+
+def check_renewal_success(sb):
+    success_selectors = [
+        '.alert-success',
+        '.alert.alert-success',
+        'div[role="alert"].alert-success',
+        'div.alert-success',
+        'span:contains("successfully purchased")',
+        'div:contains("successfully purchased")'
+    ]
+    
+    print("⏳ 等待5秒检查续期结果...")
+    time.sleep(5)
+    
+    for selector in success_selectors:
+        try:
+            element = sb.find_element(selector, timeout=2)
+            if element:
+                text = element.text
+                print(f"✅ 发现成功提示！选择器: {selector}")
+                return True, text
+        except Exception:
+            continue
+    
+    try:
+        page_source = sb.get_page_source()
+        if "successfully purchased" in page_source.lower():
+            print("✅ 页面源码中发现 'successfully purchased' 关键词")
+            return True, "服务器已成功续期"
+    except Exception:
+        pass
+    
+    return False, "未检测到续期成功提示"
+
 def start_or_reboot_server(sb, url):
     print(f"🔄 准备进入服务器面板进行启动/重启: {url}")
     try:
@@ -219,18 +305,13 @@ def start_or_reboot_server(sb, url):
         if sb.is_element_visible('input[type="password"]'):
             print("🔒 检测到控制面板需要独立登录，正在尝试自动输入账号密码...")
             try:
-                if sb.is_element_visible('input[name="user"]'):
-                    sb.type('input[name="user"]', EMAIL)
-                elif sb.is_element_visible('input[type="text"]'):
-                    sb.type('input[type="text"]', EMAIL)
-                sb.type('input[type="password"]', PASSWORD)
+                fill_input_safely(sb, "email", EMAIL)
+                fill_input_safely(sb, "password", PASSWORD)
                 time.sleep(1)
-                
                 try:
                     sb.uc_gui_click_captcha()
                 except Exception:
                     pass 
-                
                 time.sleep(3) 
                 try:
                     sb.click('button:contains("Login")')
@@ -283,8 +364,8 @@ def start_or_reboot_server(sb, url):
                         btn_clicked = True
                         action_name = "重启"
                         break
-                except Exception:
-                    continue
+            except Exception:
+                continue
                 
         if not btn_clicked:
             print("⚠️ 未能通过常规选择器找到可用按钮，正在使用 JavaScript 定位...")
@@ -342,60 +423,74 @@ def main():
         sb_kwargs["proxy"] = PROXY_SERVER
 
     with SB(**sb_kwargs) as sb:
-        success, url = login(sb, EMAIL, PASSWORD)
-        
-        if not success:
-            msg = "❌ 登录失败，请检查账号密码或验证码拦截情况。"
-            print(msg)
-            send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="login_failed.png")
-            return
-
-        print("📄 开始续期流程...")
-        ok, info = click_extend_button(sb)
-        
-        if not ok:
-            if info.get("not_time"):
-                msg_renewal = "⏳ 未到续期时间，Extend 按钮尚未出现（一般到期前半小时开放），本次跳过。"
-            else:
-                msg_renewal = f"❌ 续期失败，未找到 Extend 按钮 ({info.get('error')})。"
-            print(msg_renewal)
-        else:
-            time.sleep(1)
-            try:
-                button = sb.find_element('button:contains("Order now")', timeout=5)
-                if button:
-                    print("🛒 点击 Order now 按钮...")
-                    sb.uc_click('button:contains("Order now")')
-                else:
-                    msg_renewal = "❌ 续期异常，未找到 Order now 按钮。"
-                    print(msg_renewal)
-            except Exception as e:
-                msg_renewal = f"❌ 点击 Order now 发生错误: {e}。"
-                print(msg_renewal)
+        try:
+            success, url = login(sb, EMAIL, PASSWORD)
             
-            print("🔍 检查续期结果...")
-            renewal_success, renewal_msg = check_renewal_success(sb)
-            if renewal_success:
-                msg_renewal = f"✅ 续期成功！{renewal_msg}"
-                sb.save_screenshot("renewal_success.png")
-            else:
-                msg_renewal = f"❌ 续期可能失败: {renewal_msg}"
-                sb.save_screenshot("renewal_failed.png")
-            print(msg_renewal)
+            if not success:
+                msg = "❌ 登录失败，请检查账号密码或验证码拦截情况。"
+                print(msg)
+                send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="login_failed.png")
+                return
 
-        print("🔄 开始检查并执行服务器启动/重启维护...")
-        reboot_ok, reboot_msg = start_or_reboot_server(sb, SERVER_URL)
-        
-        if reboot_ok:
-            msg_reboot = f"✅ 自动状态维护成功: {reboot_msg}"
-        else:
-            msg_reboot = f"⚠️ 状态维护失败: {reboot_msg}"
-        print(msg_reboot)
-        
-        final_image = "final_result.png"
-        sb.save_screenshot(final_image)
-        final_msg = f"IP: {current_ip}\n\n{msg_renewal}\n---\n{msg_reboot}"
-        send_tg(TG_BOT_TOKEN, TG_CHAT_ID, final_msg, image_path=final_image)
+            print("📄 开始续期流程...")
+            ok, info = click_extend_button(sb)
+            
+            if not ok:
+                if info.get("not_time"):
+                    msg_renewal = "⏳ 未到续期时间，Extend 按钮尚未出现（一般到期前半小时开放），本次跳过。"
+                else:
+                    msg_renewal = f"❌ 续期失败，未找到 Extend 按钮 ({info.get('error')})。"
+                print(msg_renewal)
+            else:
+                time.sleep(1)
+                try:
+                    button = sb.find_element('button:contains("Order now")', timeout=5)
+                    if button:
+                        print("🛒 点击 Order now 按钮...")
+                        sb.uc_click('button:contains("Order now")')
+                    else:
+                        msg_renewal = "❌ 续期异常，未找到 Order now 按钮。"
+                        print(msg_renewal)
+                except Exception as e:
+                    msg_renewal = f"❌ 点击 Order now 发生错误: {e}。"
+                    print(msg_renewal)
+                
+                print("🔍 检查续期结果...")
+                renewal_success, renewal_msg = check_renewal_success(sb)
+                if renewal_success:
+                    msg_renewal = f"✅ 续期成功！{renewal_msg}"
+                    sb.save_screenshot("renewal_success.png")
+                else:
+                    msg_renewal = f"❌ 续期可能失败: {renewal_msg}"
+                    sb.save_screenshot("renewal_failed.png")
+                print(msg_renewal)
+
+            print("🔄 开始检查并执行服务器启动/重启维护...")
+            reboot_ok, reboot_msg = start_or_reboot_server(sb, SERVER_URL)
+            
+            if reboot_ok:
+                msg_reboot = f"✅ 自动状态维护成功: {reboot_msg}"
+            else:
+                msg_reboot = f"⚠️ 状态维护失败: {reboot_msg}"
+            print(msg_reboot)
+            
+            final_image = "final_result.png"
+            sb.save_screenshot(final_image)
+            final_msg = f"IP: {current_ip}\n\n{msg_renewal}\n---\n{msg_reboot}"
+            send_tg(TG_BOT_TOKEN, TG_CHAT_ID, final_msg, image_path=final_image)
+
+        except Exception as crash_err:
+            print(f"🔥 发生未捕获致命异常: {crash_err}")
+            traceback.print_exc()
+            # 致命异常发生时强制截图存证
+            crash_screenshot = "crash_exception.png"
+            try:
+                sb.save_screenshot(crash_screenshot)
+                print(f"📸 已强制保存崩溃存证截图: {crash_screenshot}")
+            except Exception:
+                pass
+            send_tg(TG_BOT_TOKEN, TG_CHAT_ID, f"🔥 运行崩溃: {crash_err}", image_path=crash_screenshot)
+            sys.exit(1)
 
     print("🏁 脚本执行完毕")
 
