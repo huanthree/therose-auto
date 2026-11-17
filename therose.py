@@ -5,14 +5,15 @@ import os, re, sys, time, requests
 from seleniumbase import SB
 
 # 环境变量
-EMAIL = (os.environ.get("EMAIL") or "").strip()            # 去除可能误带的首尾空白
-PASSWORD = (os.environ.get("PASSWORD") or "").strip()
+EMAIL = (os.environ.get("EMAIL") or "").strip()            # 邮箱，自动去除前后空白
+PASSWORD = (os.environ.get("PASSWORD") or "").strip()      # 密码，自动去除前后空白
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 
 # 目标服务器面板地址
 SERVER_URL = os.environ.get("SERVER_URL") or "https://panel.therose.cloud/server/1ce3ddfb"
-BASE_URL = "https://client.therose.cloud/login"
+# 修正后的主站登录入口
+BASE_URL = "https://therose.cloud/login"
 
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 
@@ -134,7 +135,6 @@ def wait_for_turnstile_token(sb, max_wait=20):
     start_time = time.time()
     while time.time() - start_time < max_wait:
         try:
-            # 检查是否有非空的 cf-turnstile-response 值
             token = sb.execute_script("""
                 const el = document.querySelector('[name="cf-turnstile-response"]');
                 return el ? el.value : "";
@@ -168,19 +168,17 @@ def login(sb, email, password):
 
     print("🛡 处理 Turnstile 验证码...")
     try:
-        # 先尝试点击 Turnstile 复选框
         sb.uc_gui_click_captcha()
     except Exception as e:
         print(f"⚠️ uc_gui_click_captcha 调用提示: {e}")
 
-    # 动态等待 Token 生成，最多等 20 秒
+    # 动态等待 Token 产生
     wait_for_turnstile_token(sb, max_wait=20)
     sb.sleep(1)
 
     for attempt in range(3):
         print(f"🔑 点击登录按钮...(第 {attempt + 1} 次)")
         try:
-            # 兼容多种 Sign in 选择器
             if sb.is_element_visible('button:contains("Sign in")'):
                 sb.uc_click('button:contains("Sign in")')
             else:
@@ -188,14 +186,13 @@ def login(sb, email, password):
         except Exception as e:
             print(f"⚠️ 点击异常: {e}")
 
-        # 检查是否跳转或出现错误
         for _ in range(6):
             current_url = sb.get_current_url()
-            if "panel" in current_url or "/dashboard" in current_url:
+            # 适配跳转到主控制台 /dashboard 或独立面板 /panel 的情况
+            if "dashboard" in current_url or "panel" in current_url:
                 print(f"✅ 登录成功，当前 URL: {current_url}")
                 return True, current_url
             
-            # 检测是否提示凭据错误
             err_selectors = ['.alert-danger', 'div[role="alert"]', '.text-danger']
             for sel in err_selectors:
                 if sb.is_element_visible(sel):
